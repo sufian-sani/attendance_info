@@ -3,15 +3,14 @@ import json
 import os
 from datetime import datetime, time
 from collections import defaultdict
-import pytz  # ✅ using pytz for timezone handling
+import pytz
 
-# --- Shift rules ---
+
 SHIFT_START = time(9, 0)
 SHIFT_END = time(18, 0)
 LATE_ENTRY_LIMIT = time(9, 30)
 EARLY_EXIT_LIMIT = time(17, 0)
 
-# Define Dhaka timezone
 DHAKA_TZ = pytz.timezone('Asia/Dhaka')
 
 
@@ -21,6 +20,7 @@ def convert_to_bst(ts: int) -> datetime:
 
 
 def validate_row(parts: list, line_number: int, line: str) -> str | None:
+    """this function validates each row of the CSV file to ensure it has the correct number of columns."""
     if len(parts) < 4:
         return f"Line {line_number}: Missing columns → {line.strip()}"
     elif len(parts) > 6:
@@ -31,7 +31,7 @@ def validate_row(parts: list, line_number: int, line: str) -> str | None:
 def parse_timestamp(parts: list, line_number: int, line: str):
     ts_index = next((i for i, p in enumerate(parts) if p.isdigit() and len(p) > 6), None)
     if ts_index is None:
-        return None, None, f"Line {line_number}: Missing or invalid timestamp → {line.strip()}"
+        return None, None, f"Line {line_number}: Missing or invalid timestamp: {line.strip()}"
     ts_str = parts[ts_index]
     device = " ".join(parts[ts_index + 1:])
     return ts_str, device, None
@@ -57,7 +57,7 @@ def read_and_parse_data(csv_file_path: str):
     data, errors = [], []
 
     if not os.path.exists(csv_file_path):
-        errors.append(f"❌ File not found: {csv_file_path}")
+        errors.append(f"File not found: {csv_file_path}")
         return data, errors
 
     with open(csv_file_path, encoding="utf-8") as f:
@@ -76,7 +76,6 @@ def read_and_parse_data(csv_file_path: str):
 
             try:
                 ts = int(ts_str)
-                # ✅ Use pytz-based Dhaka timezone conversion
                 dt = datetime.fromtimestamp(ts, tz=DHAKA_TZ)
             except Exception as e:
                 errors.append(f"Line {line_no}: Invalid timestamp '{ts_str}' → {e}")
@@ -111,24 +110,24 @@ def process_daily_records(grouped_data: dict):
     excel_data = []
 
     for (emp_code, date_), records in grouped_data.items():
+        print(date_)
         records.sort(key=lambda r: r["datetime"])
         first, last = records[0], records[-1]
         total_punches = len(records)
         working_hours = calculate_working_hours(first["datetime"], last["datetime"], total_punches)
         late, early = check_attendance_flags(first["datetime"], last["datetime"])
 
-        # JSON with both timestamp and formatted time
+        late_flag = 1 if late == "Yes" else 0
+        early_flag = 1 if early == "Yes" else 0
+        
         final_output[str(date_)].append({
             "emp_code": emp_code,
             "first_punch": first["datetime"].strftime("%H:%M"),
-            "first_ts": first["timestamp"],
             "last_punch": last["datetime"].strftime("%H:%M"),
-            "last_ts": last["timestamp"],
             "total_punches": total_punches,
             "working_hours": working_hours,
-            "late_entry": late,
-            "early_exit": early,
-            "shift_period": "09:00 - 18:00"
+            "late_entry": late_flag,
+            "early_exit": early_flag
         })
 
         excel_data.append({
@@ -138,8 +137,8 @@ def process_daily_records(grouped_data: dict):
             "Last Punch": last["datetime"].strftime("%H:%M"),
             "Total Punches": total_punches,
             "Working Hours": working_hours,
-            "Late Entry": late,
-            "Early Exit": early
+            "Late Entry": late_flag,
+            "Early Exit": early_flag
         })
 
     return final_output, excel_data
@@ -148,7 +147,7 @@ def process_daily_records(grouped_data: dict):
 def write_json_output(json_file_path: str, data: dict):
     with open(json_file_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
-    print(f"✅ JSON file created: {json_file_path}")
+    print(f"JSON file created: {json_file_path}")
 
 
 def write_excel_output(excel_file_path: str, excel_data: list):
@@ -165,46 +164,30 @@ def write_excel_output(excel_file_path: str, excel_data: list):
             for col_idx, h in enumerate(headers):
                 ws.write(row_idx, col_idx, rec[h])
         wb.save(excel_file_path)
-        print(f"✅ Excel file created: {excel_file_path}")
+        print(f"Excel file created: {excel_file_path}")
     except ImportError:
-        print("❌ xlwt not found, creating CSV instead...")
+        print("xlwt not found, creating CSV instead...")
         csv_path = excel_file_path.replace(".xls", ".csv")
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=headers)
             writer.writeheader()
             writer.writerows(excel_data)
-        print(f"✅ CSV file created: {csv_path}")
+        print(f"CSV file created: {csv_path}")
 
 
 def write_error_log(error_log_path: str, errors: list):
     if errors:
         with open(error_log_path, "w", encoding="utf-8") as f:
             f.write("\n".join(errors))
-        print(f"⚠️ Some rows skipped. Check: {error_log_path}")
+        print(f"Some rows skipped. Check: {error_log_path}")
     else:
-        print("✅ All rows processed successfully.")
-
-
-def generate_statistics(data: list, final_output: dict, errors: list):
-    total_employees = len({d["emp_code"] for d in data})
-    total_days = len(final_output)
-    total_records = sum(len(v) for v in final_output.values())
-    late = sum(1 for v in final_output.values() for r in v if r["late_entry"] == "Yes")
-    early = sum(1 for v in final_output.values() for r in v if r["early_exit"] == "Yes")
-
-    print("\n📊 Processing Statistics:")
-    print(f"• Total employees: {total_employees}")
-    print(f"• Total days: {total_days}")
-    print(f"• Attendance records: {total_records}")
-    print(f"• Late entries: {late}")
-    print(f"• Early exits: {early}")
-    print(f"• Errors: {len(errors)}")
+        print("All rows processed successfully.")
 
 
 def process_attendance(csv_path, json_path, excel_path, error_log):
     data, errors = read_and_parse_data(csv_path)
     if not data:
-        print("❌ No valid data to process.")
+        print("No valid data to process.")
         return
 
     data = remove_duplicates(data)
@@ -215,7 +198,6 @@ def process_attendance(csv_path, json_path, excel_path, error_log):
     write_json_output(json_path, final_json)
     write_excel_output(excel_path, excel_data)
     write_error_log(error_log, errors)
-    generate_statistics(data, final_json, errors)
 
 
 if __name__ == "__main__":

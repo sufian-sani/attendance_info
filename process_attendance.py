@@ -1,154 +1,208 @@
-import os
+import csv
 import json
-from datetime import datetime, time, timedelta
+import os
+from datetime import datetime, time
 from collections import defaultdict
-from zoneinfo import ZoneInfo
+import pytz
 
 
-# --- Shift Configuration ---
 SHIFT_START = time(9, 0)
 SHIFT_END = time(18, 0)
 LATE_ENTRY_LIMIT = time(9, 30)
 EARLY_EXIT_LIMIT = time(17, 0)
-SHIFT_PERIOD = "09 AM - 6 PM"
+
+DHAKA_TZ = pytz.timezone('Asia/Dhaka')
 
 
-def convert_to_bangladesh_time(timestamp: int) -> datetime:
-    """Convert UTC timestamp to Bangladesh Standard Time (UTC+6)."""
-    return datetime.fromtimestamp(int(timestamp), tz=ZoneInfo("Asia/Dhaka"))
+def convert_to_bst(ts: int) -> datetime:
+    """Convert Unix timestamp to Asia/Dhaka timezone."""
+    return datetime.fromtimestamp(ts, tz=DHAKA_TZ)
 
 
-def determine_status(current_time: time) -> str:
-    """Determine attendance status based on punch time."""
-    if LATE_ENTRY_LIMIT < current_time < time(12, 0):
-        return "Late Entry"
-    elif time(12, 0) < current_time < EARLY_EXIT_LIMIT:
-        return "Early Exit"
-    return "On Time"
-
-
-def parse_log_line(line: str, line_number: int, errors: list):
-    """Parse a single log line safely and return structured data."""
-    parts = line.strip().split()
-
-    if len(parts) < 5:
-        errors.append(f"Line {line_number}: Missing columns → {line.strip()}")
-        return None
+def validate_row(parts: list, line_number: int, line: str) -> str | None:
+    """this function validates each row of the CSV file to ensure it has the correct number of columns."""
+    if len(parts) < 4:
+        return f"Line {line_number}: Missing columns → {line.strip()}"
     elif len(parts) > 6:
-        errors.append(f"Line {line_number}: Too many columns → {line.strip()}")
-        return None
-
-    emp_code, first_name, last_name = parts[:3]
-    timestamp_index = next((i for i, p in enumerate(parts) if p.isdigit() and len(p) > 6), None)
-
-    if timestamp_index is None:
-        errors.append(f"Line {line_number}: Missing or invalid timestamp → {line.strip()}")
-        return None
-
-    timestamp = parts[timestamp_index]
-    device = " ".join(parts[timestamp_index + 1:])
-
-    try:
-        dt_bd = convert_to_bangladesh_time(int(timestamp))
-    except Exception as e:
-        errors.append(f"Line {line_number}: Invalid timestamp '{timestamp}' → {e}")
-        return None
-
-    status = determine_status(dt_bd.time())
-
-    return {
-        "emp_code": emp_code,
-        "first_name": first_name,
-        "last_name": last_name,
-        "datetime": dt_bd,
-        "device": device,
-        "status": status,
-        "shift_period": SHIFT_PERIOD,
-    }
+        return f"Line {line_number}: Too many columns → {line.strip()}"
+    return None
 
 
-def summarize_attendance(records):
-    """Summarize grouped attendance data for each employee-date."""
+def parse_timestamp(parts: list, line_number: int, line: str):
+    ts_index = next((i for i, p in enumerate(parts) if p.isdigit() and len(p) > 6), None)
+    if ts_index is None:
+        return None, None, f"Line {line_number}: Missing or invalid timestamp: {line.strip()}"
+    ts_str = parts[ts_index]
+    device = " ".join(parts[ts_index + 1:])
+    return ts_str, device, None
+
+
+def calculate_working_hours(first_punch: datetime, last_punch: datetime, total_punches: int) -> str:
+    if total_punches > 1:
+        duration = last_punch - first_punch
+        total_seconds = max(0, duration.total_seconds())
+        hours, remainder = divmod(int(total_seconds), 3600)
+        minutes = remainder // 60
+        return f"{hours:02}:{minutes:02}"
+    return "00:00"
+
+
+def check_attendance_flags(first_punch: datetime, last_punch: datetime):
+    late = "Yes" if first_punch.time() > LATE_ENTRY_LIMIT else "No"
+    early = "Yes" if last_punch.time() < EARLY_EXIT_LIMIT else "No"
+    return late, early
+
+
+def read_and_parse_data(csv_file_path: str):
+    data, errors = [], []
+
+    if not os.path.exists(csv_file_path):
+        errors.append(f"File not found: {csv_file_path}")
+        return data, errors
+
+    with open(csv_file_path, encoding="utf-8") as f:
+        for line_no, line in enumerate(f, start=1):
+            parts = line.strip().split()
+            error = validate_row(parts, line_no, line)
+            if error:
+                errors.append(error)
+                continue
+
+            emp_code, first_name, last_name = parts[:3]
+            ts_str, device, ts_error = parse_timestamp(parts, line_no, line)
+            if ts_error:
+                errors.append(ts_error)
+                continue
+
+            try:
+                ts = int(ts_str)
+                dt = datetime.fromtimestamp(ts, tz=DHAKA_TZ)
+            except Exception as e:
+                errors.append(f"Line {line_no}: Invalid timestamp '{ts_str}' → {e}")
+                continue
+
+            data.append({
+                "emp_code": emp_code,
+                "first_name": first_name,
+                "last_name": last_name,
+                "datetime": dt,
+                "device": device,
+                "timestamp": ts
+            })
+    return data, errors
+
+
+def remove_duplicates(data: list) -> list:
+    unique = {(d["emp_code"], d["datetime"], d["device"]): d for d in data}
+    return list(unique.values())
+
+
+def group_by_employee_and_date(data: list) -> dict:
+    grouped = defaultdict(list)
+    for record in data:
+        key = (record["emp_code"], record["datetime"].date())
+        grouped[key].append(record)
+    return grouped
+
+
+def process_daily_records(grouped_data: dict):
     final_output = defaultdict(list)
+    excel_data = []
 
-    for (emp_code, date), punches in records.items():
-        punches.sort(key=lambda r: r["datetime"])
+    for (emp_code, date_), records in grouped_data.items():
+        print(date_)
+        records.sort(key=lambda r: r["datetime"])
+        first, last = records[0], records[-1]
+        total_punches = len(records)
+        working_hours = calculate_working_hours(first["datetime"], last["datetime"], total_punches)
+        late, early = check_attendance_flags(first["datetime"], last["datetime"])
 
-        first_punch = punches[0]["datetime"]
-        last_punch = punches[-1]["datetime"]
-        total_punches = len(punches)
-
-        # Calculate working duration
-        if total_punches > 1:
-            duration = last_punch - first_punch
-            hours, remainder = divmod(duration.seconds, 3600)
-            minutes = remainder // 60
-            working_hours = f"{hours:02}:{minutes:02}"
-        else:
-            working_hours = "00:00"
-
-        late_entry = 1 if first_punch.time() > LATE_ENTRY_LIMIT else 0
-        early_exit = 1 if last_punch.time() < EARLY_EXIT_LIMIT else 0
-
-        final_output[str(date)].append({
+        late_flag = 1 if late == "Yes" else 0
+        early_flag = 1 if early == "Yes" else 0
+        
+        final_output[str(date_)].append({
             "emp_code": emp_code,
-            "first_punch": first_punch.strftime("%I:%M %p"),
-            "last_punch": last_punch.strftime("%I:%M %p"),
+            "first_punch": first["datetime"].strftime("%H:%M"),
+            "last_punch": last["datetime"].strftime("%H:%M"),
             "total_punches": total_punches,
             "working_hours": working_hours,
-            "late_entry": late_entry,
-            "early_exit": early_exit,
-            "shift_period": SHIFT_PERIOD,
+            "late_entry": late_flag,
+            "early_exit": early_flag
         })
 
-    # Sort by date and emp_code
-    sorted_output = {
-        date: sorted(records, key=lambda x: x["emp_code"])
-        for date, records in sorted(final_output.items())
-    }
-    return sorted_output
+        excel_data.append({
+            "Date": str(date_),
+            "Emp Code": emp_code,
+            "First Punch": first["datetime"].strftime("%H:%M"),
+            "Last Punch": last["datetime"].strftime("%H:%M"),
+            "Total Punches": total_punches,
+            "Working Hours": working_hours,
+            "Late Entry": late_flag,
+            "Early Exit": early_flag
+        })
+
+    return final_output, excel_data
 
 
-def process_attendance(csv_file_path, json_file_path, error_log_path):
-    """Main attendance processing pipeline."""
-    if not os.path.exists(csv_file_path):
-        print(f"❌ File not found: {csv_file_path}")
+def write_json_output(json_file_path: str, data: dict):
+    with open(json_file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+    print(f"JSON file created: {json_file_path}")
+
+
+def write_excel_output(excel_file_path: str, excel_data: list):
+    try:
+        import xlwt
+        wb = xlwt.Workbook()
+        ws = wb.add_sheet("Attendance Summary")
+        headers = ["Date", "Emp Code", "First Punch", "Last Punch", "Total Punches",
+                   "Working Hours", "Late Entry", "Early Exit"]
+        style = xlwt.easyxf("font: bold on")
+        for col, h in enumerate(headers):
+            ws.write(0, col, h, style)
+        for row_idx, rec in enumerate(excel_data, 1):
+            for col_idx, h in enumerate(headers):
+                ws.write(row_idx, col_idx, rec[h])
+        wb.save(excel_file_path)
+        print(f"Excel file created: {excel_file_path}")
+    except ImportError:
+        print("xlwt not found, creating CSV instead...")
+        csv_path = excel_file_path.replace(".xls", ".csv")
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(excel_data)
+        print(f"CSV file created: {csv_path}")
+
+
+def write_error_log(error_log_path: str, errors: list):
+    if errors:
+        with open(error_log_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(errors))
+        print(f"Some rows skipped. Check: {error_log_path}")
+    else:
+        print("All rows processed successfully.")
+
+
+def process_attendance(csv_path, json_path, excel_path, error_log):
+    data, errors = read_and_parse_data(csv_path)
+    if not data:
+        print("No valid data to process.")
         return
 
-    data = []
-    error_lines = []
+    data = remove_duplicates(data)
+    grouped = group_by_employee_and_date(data)
+    final_json, excel_data = process_daily_records(grouped)
+    final_json = {date: sorted(records, key=lambda r: r["emp_code"]) for date, records in final_json.items()}
 
-    # --- Step 1: Parse all lines ---
-    with open(csv_file_path, "r", encoding="utf-8") as file:
-        for i, line in enumerate(file, start=1):
-            parsed = parse_log_line(line, i, error_lines)
-            if parsed:
-                data.append(parsed)
-
-    # --- Step 2: Group by emp_code and date ---
-    grouped = defaultdict(list)
-    for entry in data:
-        grouped[(entry["emp_code"], entry["datetime"].date())].append(entry)
-
-    # --- Step 3: Summarize attendance ---
-    result = summarize_attendance(grouped)
-
-    # --- Step 4: Save results ---
-    with open(json_file_path, "w", encoding="utf-8") as out:
-        json.dump(result, out, indent=4)
-    print(f"✅ JSON file created: {json_file_path}")
-
-    # --- Step 5: Log errors if any ---
-    if error_lines:
-        with open(error_log_path, "w", encoding="utf-8") as err:
-            err.write("\n".join(error_lines))
-        print(f"⚠️ Some rows skipped. Check: {error_log_path}")
-    else:
-        print("✅ All rows processed successfully (no errors).")
+    write_json_output(json_path, final_json)
+    write_excel_output(excel_path, excel_data)
+    write_error_log(error_log, errors)
 
 
 if __name__ == "__main__":
-    csv_path = "attendance_logs/attendance_logs_2.log"
-    json_path = "attendance.json"
-    error_log = "error_log.txt"
-    process_attendance(csv_path, json_path, error_log)
+    csv_file = "attendance_logs/attendance_logs_1.log"
+    json_file = "attendance_summary.json"
+    excel_file = "attendance_summary.xls"
+    error_log_file = "error_log.txt"
+    process_attendance(csv_file, json_file, excel_file, error_log_file)

@@ -1,6 +1,6 @@
 import csv
 import json
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from collections import defaultdict
 import os
 
@@ -12,11 +12,17 @@ EARLY_EXIT_LIMIT = time(17, 0)
 
 # Bangladesh UTC offset
 BDT_OFFSET = timedelta(hours=6)
+BDT = timezone(BDT_OFFSET)
 
 
 def convert_to_bdt(ts):
     """Convert Unix timestamp to Bangladesh datetime."""
-    return datetime.utcfromtimestamp(ts) + BDT_OFFSET
+    """Convert Unix timestamp to Bangladesh datetime (aware)."""
+    # Convert to UTC first
+    utc_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    # Convert to BDT
+    bdt_dt = utc_dt.astimezone(BDT)
+    return bdt_dt
 
 
 def validate_row(parts, line_number, line):
@@ -301,7 +307,7 @@ def process_attendance(csv_file_path, json_file_path, excel_file_path, error_log
 
 
 if __name__ == "__main__":
-    csv_path = "attendance_logs/attendance_logs_1.log"
+    csv_path = "attendance_logs/attendance_logs_2.log"
     json_path = "attendance_summary.json"
     excel_path = "attendance_summary.xls"  # Using .xls format which xlwt supports
     error_log = "error_log.txt"

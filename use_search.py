@@ -2,7 +2,6 @@ import os
 import json
 from datetime import datetime
 
-# Load attendance summary from JSON
 def load_attendance(file_name='attendance_summary.json'):
     current_dir = os.path.dirname(os.path.abspath(__file__))
     file_path = os.path.join(current_dir, file_name)

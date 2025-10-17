@@ -110,7 +110,6 @@ def process_daily_records(grouped_data: dict):
     excel_data = []
 
     for (emp_code, date_), records in grouped_data.items():
-        print(date_)
         records.sort(key=lambda r: r["datetime"])
         first, last = records[0], records[-1]
         total_punches = len(records)
